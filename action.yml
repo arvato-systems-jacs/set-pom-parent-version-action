@@ -1,0 +1,78 @@
+name: 'Set pom.xml parent and project version'
+description: 'Surgically updates <parent><version> and root <version> in a single pom.xml using sed.'
+inputs:
+  pom_path:
+    description: 'Path to the pom.xml file to update'
+    required: false
+    default: 'pom.xml'
+  parent_version:
+    description: 'New value for <parent><version>. Leave empty to skip.'
+    required: false
+    default: ''
+  project_version:
+    description: 'New value for root <version> (replaces X.Y-SNAPSHOT with X.Y.Z). Leave empty to skip.'
+    required: false
+    default: ''
+outputs:
+  changes_made:
+    description: '"true" if file was modified'
+    value: ${{ steps.replace.outputs.changes_made }}
+runs:
+  using: 'composite'
+  steps:
+    - name: Replace parent and project version
+      id: replace
+      shell: bash
+      env:
+        POM_PATH: ${{ inputs.pom_path }}
+        PARENT_VERSION: ${{ inputs.parent_version }}
+        PROJECT_VERSION: ${{ inputs.project_version }}
+      run: |
+        set -euo pipefail
+        changed=false
+
+        if [ -n "$PARENT_VERSION" ]; then
+          echo "Setting parent version to: $PARENT_VERSION"
+          # Replace version inside <parent>...</parent> block only
+          python3 - "$POM_PATH" "$PARENT_VERSION" << 'PY'
+import re, sys
+path, new_ver = sys.argv[1], sys.argv[2]
+content = open(path).read()
+updated = re.sub(
+    r'(<parent>[\s\S]*?<version>)[^<]*(</version>[\s\S]*?</parent>)',
+    lambda m: m.group(1) + new_ver + m.group(2),
+    content, count=1
+)
+if updated != content:
+    open(path, 'w').write(updated)
+    print(f"Updated parent version in {path}")
+PY
+          changed=true
+        fi
+
+        if [ -n "$PROJECT_VERSION" ]; then
+          echo "Setting project version to: $PROJECT_VERSION"
+          # Replace the first <version> tag that contains -SNAPSHOT at top level
+          python3 - "$POM_PATH" "$PROJECT_VERSION" << 'PY'
+import re, sys
+path, new_ver = sys.argv[1], sys.argv[2]
+content = open(path).read()
+# Match first <version>X.Y-SNAPSHOT</version> outside of <parent> block
+# Strategy: remove parent block temporarily, replace, restore
+parent_match = re.search(r'<parent>[\s\S]*?</parent>', content)
+if parent_match:
+    before = content[:parent_match.start()]
+    parent_block = parent_match.group(0)
+    after = content[parent_match.end():]
+    after_updated = re.sub(r'(<version>)[^<]*-SNAPSHOT(</version>)', r'\g<1>' + new_ver + r'\2', after, count=1)
+    updated = before + parent_block + after_updated
+else:
+    updated = re.sub(r'(<version>)[^<]*-SNAPSHOT(</version>)', r'\g<1>' + new_ver + r'\2', content, count=1)
+if updated != content:
+    open(path, 'w').write(updated)
+    print(f"Updated project version in {path}")
+PY
+          changed=true
+        fi
+
+        echo "changes_made=${changed}" >> "$GITHUB_OUTPUT"
